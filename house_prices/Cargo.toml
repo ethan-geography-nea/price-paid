@@ -1,0 +1,11 @@
+[package]
+name = "house_prices"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.217", features = ["serde_derive"] }
+csv = "1.3.1"
+chrono = { version = "0.4.39", features = ["serde"] }
