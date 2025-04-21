@@ -103,6 +103,14 @@ impl OutputCSV {
         }
     }
 
+    fn set_labels(&mut self, v: Vec<String>) {
+        self.labels = v;
+    }
+
+    fn add_row(&mut self, string: Vec<String>) {
+        self.rows.push(string);
+    }
+
     fn add_entries(&mut self, flat_name: String, building: String, ppds: Vec<PPDSRecord>) {
         self.labels.push(format!("{flat_name}, {building}"));
         for row in &mut self.rows {
@@ -113,6 +121,25 @@ impl OutputCSV {
             let mut new_row: Vec<String> = vec!["".to_string(); self.labels.len() - 1];
             new_row[0] = ppd.date.format("%Y-%m-01").to_string();
             new_row.push(format!("{}", ppd.price_paid));
+            self.rows.push(new_row);
+        }
+    }
+
+    fn add_percentage_change(
+        &mut self,
+        flat_name: String,
+        building: String,
+        percentages: Vec<(NaiveDate, f32)>,
+    ) {
+        self.labels.push(format!("{flat_name}, {building}"));
+        for row in &mut self.rows {
+            row.push("".to_string());
+        }
+
+        for (date, pc) in percentages {
+            let mut new_row: Vec<String> = vec!["".to_string(); self.labels.len() - 1];
+            new_row[0] = date.format("%Y-%m-01").to_string();
+            new_row.push(format!("{}", pc));
             self.rows.push(new_row);
         }
     }
@@ -203,7 +230,9 @@ fn filter_and_write<F, D>(
         None => datapoints_to_process,
     };
 
-    for dp in datapoints_to_process {
+    let mut percentage_change_output = OutputCSV::new();
+
+    for dp in datapoints_to_process.clone() {
         min_date = match min_date.clone() {
             None => Some(dp.first),
             Some(n) => Some(n.min(dp.first)),
@@ -217,16 +246,62 @@ fn filter_and_write<F, D>(
         // println!("{k:?} : {} {}d", v.len(), (last - first).num_days());
 
         output.add_entries(dp.flat, dp.building, dp.records);
+
+        // to paint the algorithm:
+        // 1. take all the thingys
+        // 2. % change to last thingy = x
+        // 3. % change of england / london = y
+        // 4. % change diff = x - y
+        // 5. report % change diff
     }
 
     println!("{output:?}");
 
     for ref_map in reference_maps {
         let mut records = vec![];
-        for (_, dp) in ref_map {
+        for (_, dp) in ref_map.clone() {
             if (min_date.unwrap() <= dp.time) && (dp.time <= max_date.unwrap()) {
                 records.push(dp);
             }
+        }
+
+        for d in datapoints_to_process.clone() {
+            let mut previous_record = None;
+            let mut percentages = Vec::new();
+
+            for r in d.records {
+                previous_record = match previous_record {
+                    None => {
+                        percentages.push((r.date, 0f32));
+                        Some(r)
+                    }
+                    Some(prev_r) => {
+                        let change: f32 =
+                            (r.price_paid - prev_r.price_paid) as f32 / prev_r.price_paid as f32;
+                        let new_ref = ref_map[&(r.date.month() as i32, r.date.year() as i32)]
+                            .average_price_flats;
+                        let original_ref = ref_map
+                            [&(prev_r.date.month() as i32, prev_r.date.year() as i32)]
+                            .average_price_flats;
+                        let change_of_ref: f32 =
+                            (new_ref - original_ref) as f32 / original_ref as f32;
+
+                        let percentage_change_diff = change - change_of_ref;
+                        percentages.push((r.date, percentage_change_diff * 100f32));
+                        Some(prev_r)
+                    }
+                }
+            }
+
+            percentage_change_output.add_percentage_change(
+                d.flat,
+                format!(
+                    "{} v {}",
+                    d.building,
+                    records.first().unwrap().region.clone()
+                ),
+                percentages,
+            ); // NOT DONE YET; IMPLIMENT WRITING, NEED TO SEE WHAT REFERENCE ITS FROM TOO
         }
 
         output.add_entries_hdi(
@@ -251,6 +326,125 @@ fn filter_and_write<F, D>(
     }
 
     _ = writer.flush();
+
+    let mut writer = csv::Writer::from_path("pc/".to_string() + output_filepath).unwrap();
+    _ = writer.write_record(percentage_change_output.labels);
+    for row in percentage_change_output.rows {
+        let e = writer.write_record(&row);
+        println!("{row:?}: {e:?}");
+    }
+
+    _ = writer.flush();
+}
+
+fn write_all_sale_map(
+    col: HashMap<(i32, i32), UKHPIRecord>,
+    lon: HashMap<(i32, i32), UKHPIRecord>,
+    eng: HashMap<(i32, i32), UKHPIRecord>,
+) {
+    // algorithm:
+    // * get all barbican
+    // * add date, barbican, gle, col, lon, eng
+    // * add date, price for all
+
+    let mut out = OutputCSV::new();
+    let barbican_ppd = create_ppd_mapping("estates/barbican_adapted.csv");
+    let gle_ppd = create_ppd_mapping("estates/golden_lane.csv");
+
+    out.set_labels(vec![
+        "date".to_string(),
+        "barbican".to_string(),
+        "golden_lane".to_string(),
+        "city_of_london_flats".to_string(),
+        "london_flats".to_string(),
+        "england_flats".to_string(),
+    ]);
+
+    for (_, v) in barbican_ppd {
+        for u in v {
+            let pp = format!("{}", u.price_paid);
+            let date = u.date.format("%Y-%m-%d").to_string();
+            out.add_row(vec![
+                date,
+                pp,
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ]);
+        }
+    }
+
+    for (_, v) in gle_ppd {
+        for u in v {
+            let pp = format!("{}", u.price_paid);
+            let date = u.date.format("%Y-%m-%d").to_string();
+            out.add_row(vec![
+                date,
+                "".to_string(),
+                pp,
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ]);
+        }
+    }
+
+    let mut col_v: Vec<&UKHPIRecord> = col.values().collect();
+    col_v.sort_by(|a, b| a.time.cmp(&b.time));
+    for v in col_v {
+        let pp = format!("{}", v.average_price_flats);
+        let date = v.time.format("%Y-%m-%d").to_string();
+        out.add_row(vec![
+            date,
+            "".to_string(),
+            "".to_string(),
+            pp,
+            "".to_string(),
+            "".to_string(),
+        ]);
+    }
+
+    let mut lon_v: Vec<&UKHPIRecord> = lon.values().collect();
+    lon_v.sort_by(|a, b| a.time.cmp(&b.time));
+    for v in lon_v {
+        let pp = format!("{}", v.average_price_flats);
+        let date = v.time.format("%Y-%m-%d").to_string();
+        out.add_row(vec![
+            date,
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            pp,
+            "".to_string(),
+        ]);
+    }
+
+    let mut eng_v: Vec<&UKHPIRecord> = eng.values().collect();
+    eng_v.sort_by(|a, b| a.time.cmp(&b.time));
+    for v in eng_v {
+        let pp = format!("{}", v.average_price_flats);
+        let date = v.time.format("%Y-%m-%d").to_string();
+        out.add_row(vec![
+            date,
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            pp,
+        ]);
+    }
+
+    println!("{}", out.rows.len());
+
+    let mut writer = csv::Writer::from_path("output/all-prices.csv").unwrap();
+    _ = writer.write_record(&out.labels);
+    for row in out.rows {
+        let e = writer.write_record(&row);
+        println!("{:?} {row:?}: {e:?}", out.labels);
+    }
+
+    _ = writer.flush();
 }
 
 fn main() {
@@ -265,15 +459,17 @@ fn main() {
         |x| x < 3,
         |x| x < 7300,
         Some(10),
-        "output-final/barbican-output.csv",
+        "output/barbican-output-4.csv",
     );
 
     filter_and_write(
         create_ppd_mapping("estates/golden_lane.csv"),
-        vec![col_map, london_map, eng_map],
+        vec![col_map.clone(), london_map.clone(), eng_map.clone()],
         |x| x < 3,
         |x| x < 7300,
         None,
-        "output-final/golden-lane-output.csv",
+        "output/golden-lane-output-4.csv",
     );
+
+    write_all_sale_map(col_map, london_map, eng_map);
 }
